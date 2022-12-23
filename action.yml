@@ -1,0 +1,114 @@
+name: 'Docker Base Image Build and Publish'
+description: 'A Composite Action that Builds and Publishes a Docker Base Image'
+author: 'RICADO Group'
+branding:
+  icon: 'box'
+  color: 'blue'
+
+# Inputs
+inputs:
+  github-token:
+    description: 'The GitHub Token used to Generate a Changelog and Create Releases'
+    required: true
+  docker-image-name:
+    description: 'The Name of the Docker Image being Built'
+    required: true
+  docker-image-platforms:
+    description: 'The Platforms that the Docker Image should be built for as a comma-separated list (e.g. linux/amd64,linux/arm64,linux/arm/v7)'
+    required: false
+    default: 'linux/amd64'
+  dockerfile-path:
+    description: 'Path to the Dockerfile used to Build the Docker Image (e.g. ./ProjectFolder/Dockerfile)'
+    required: false
+    default: './Dockerfile'
+  docker-hub-username:
+    description: 'Username to Authenticate with Docker Hub'
+    required: true
+  docker-hub-password:
+    description: 'Password to Authenticate with Docker Hub'
+    required: true
+
+# Outputs
+outputs:
+  changelog:
+    description: 'Markdown formatted changelog'
+    value: ${{ steps.changelog.outputs.changelog }}
+
+runs:
+  using: 'composite'
+  steps:
+    # Step 1 - Extract Environment Variables
+    - name: Extract Environment Variables
+      uses: FranzDiebold/github-env-vars-action@v2
+    
+    # Step 2 - Generate Docker Image Metadata
+    - name: Generate Docker Image Metadata
+      id: metadata
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ inputs.docker-image-name }}
+        flavor: |
+          latest=false
+        tags: |
+          type=semver,pattern={{version}}
+          type=ref,event=pr
+          type=raw,value=latest,enable=${{ !startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/pull/') }}
+    
+    # Step 3 - Setup QEMU
+    - name: Setup QEMU
+      uses: docker/setup-qemu-action@v2
+    
+    # Step 4 - Setup Docker Buildx
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    # Step 5 - Login to Docker Hub
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ inputs.docker-hub-username }}
+        password: ${{ inputs.docker-hub-password }}
+    
+    # Step 6.1 - Build the Docker Image (Pull-Request)
+    - name: Build the Docker Image
+      if: ${{ startsWith(github.ref, 'refs/pull/') }}
+      uses: docker/build-push-action@v3
+      with:
+        context: .
+        platforms: ${{ inputs.docker-image-platforms }}
+        push: false
+        file: ${{ inputs.dockerfile-path }}
+        tags: ${{ steps.metadata.outputs.tags }}
+        labels: ${{ steps.metadata.outputs.labels }}
+    
+    # Step 6.2 - Build and Push a Docker Image
+    - name: Build and Push Docker Image
+      if: ${{ !startsWith(github.ref, 'refs/pull/') }}
+      uses: docker/build-push-action@v3
+      with:
+        context: .
+        platforms: ${{ inputs.docker-image-platforms }}
+        push: true
+        file: ${{ inputs.dockerfile-path }}
+        tags: ${{ steps.metadata.outputs.tags }}
+        labels: ${{ steps.metadata.outputs.labels }}
+
+    # Step 7 - Generate the Changelog
+    - name: Generate the Changelog
+      id: changelog
+      if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      uses: metcalfc/changelog-generator@v4.0.1
+      with:
+        myToken: ${{ inputs.github-token }}
+    
+    # Step 8 - Create GitHub Release
+    - name: Create GitHub Release
+      id: create-release
+      if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      uses: softprops/action-gh-release@v1
+      with:
+        token: ${{ inputs.github-token }}
+        tag_name: ${{ env.CI_REF_NAME }}
+        name: Version ${{ env.CI_REF_NAME }}
+        body: |
+          ${{ steps.changelog.outputs.changelog }}
